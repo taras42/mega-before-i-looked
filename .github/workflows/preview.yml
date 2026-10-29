@@ -1,0 +1,68 @@
+name: Digest preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_marker:
+        description: Include the lane marker in the public preview
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install and validate
+        run: |
+          corepack pnpm install --no-frozen-lockfile
+          corepack pnpm test
+          corepack pnpm typecheck
+
+      - uses: actions/configure-pages@v5
+
+      - name: Render the digest
+        env:
+          LANE_MARKER: ${{ inputs.include_marker && secrets.LANE_MARKER || '' }}
+          PORT: '8787'
+        run: |
+          if [[ '${{ inputs.include_marker }}' == 'true' && -z "$LANE_MARKER" ]]; then
+            echo "::error::LANE_MARKER secret is required when include_marker=true."
+            exit 1
+          fi
+          umask 077
+          printf 'LANE_MARKER=%s\nPORT=%s\n' "$LANE_MARKER" "$PORT" > .env
+          mkdir -p "$RUNNER_TEMP/rig-preview"
+          corepack pnpm start > "$RUNNER_TEMP/rig-server.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; rm -f .env' EXIT
+          curl --fail --silent --show-error \
+            --retry 30 --retry-delay 1 --retry-connrefused --max-time 10 \
+            http://localhost:8787/digest/2026-10-28 \
+            --output "$RUNNER_TEMP/rig-preview/index.html"
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ runner.temp }}/rig-preview
+          retention-days: 1
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
